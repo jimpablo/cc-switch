@@ -2775,6 +2775,7 @@ fn model_pricing_candidates(model_id: &str) -> Vec<PricingCandidate> {
     }
 
     let mut candidates = Vec::new();
+    let mut flash_tiered_fallbacks = Vec::new();
     let mut queue = vec![PricingCandidate {
         model_id: cleaned,
         allow_prefix_match: true,
@@ -2814,7 +2815,7 @@ fn model_pricing_candidates(model_id: &str) -> Vec<PricingCandidate> {
         // exact `gemini-<ver>-flash` row so missing base Flash models never prefix-match
         // sibling `gemini-<ver>-flash-lite` or custom sub-tier entries.
         if let Some(stripped) = strip_gemini_flash_tiered_suffix(&candidate) {
-            queue.push(PricingCandidate {
+            flash_tiered_fallbacks.push(PricingCandidate {
                 model_id: stripped,
                 allow_prefix_match: false,
             });
@@ -2829,6 +2830,10 @@ fn model_pricing_candidates(model_id: &str) -> Vec<PricingCandidate> {
         }
     }
 
+    // Check all normalized model IDs for an exact price before falling back to base Flash.
+    for fallback in flash_tiered_fallbacks {
+        push_unique_candidate(&mut candidates, fallback);
+    }
     candidates
 }
 
@@ -6411,6 +6416,29 @@ mod tests {
             find_model_pricing_row(&conn, "gemini-3.8-flash-tiered-high")?,
             Some(("3".into(), "12".into(), "0.3".into(), "0".into()))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gemini_flash_tiered_namespaced_override_precedes_base() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+        conn.execute(
+            "INSERT INTO model_pricing VALUES ('gemini-3.8-flash-tiered-high',
+             'Custom Gemini 3.8 Flash Tiered High', '3', '12', '0.3', '0')",
+            [],
+        )?;
+        let expected_price = Some(("3".into(), "12".into(), "0.3".into(), "0".into()));
+        for model in [
+            "google.gemini-3.8-flash-tiered-high",
+            "claude-gemini-3.8-flash-tiered-high",
+        ] {
+            assert_eq!(
+                find_model_pricing_row(&conn, model)?,
+                expected_price,
+                "{model}"
+            );
+        }
         Ok(())
     }
 
